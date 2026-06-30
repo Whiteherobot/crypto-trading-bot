@@ -1,0 +1,23 @@
+# Secretos
+.env
+
+# Entorno virtual
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Logs y datos cacheados
+logs/*.log
+data/cache/
+
+# Diario SQLite del bot (se regenera al correr)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Resultados de backtest (gráficos generados)
+backtest/output/
