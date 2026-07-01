@@ -10,8 +10,10 @@ distintos, activamos WAL para permitir lectura concurrente sin bloqueos.
 Tablas:
   - trades : cada orden ejecutada, con su order_id, motivo e indicadores
              en el momento de la decisión (para cruzar con la API de Binance).
-  - equity : snapshots de equity del BOT vs equity REAL de Binance (drift).
+  - equity : snapshots de equity de la ESTRATEGIA vs benchmark comprar-y-mantener.
   - bot_status : una sola fila = heartbeat + últimos indicadores + posición.
+  - position_state : una sola fila = estado persistente de la posición, para
+                     poder RECUPERARLO si el bot se reinicia (crash, reboot).
 """
 
 from __future__ import annotations
@@ -60,9 +62,9 @@ class Journal:
                 );
 
                 CREATE TABLE IF NOT EXISTS equity (
-                    ts             TEXT NOT NULL,
-                    bot_equity     REAL NOT NULL,
-                    binance_equity REAL NOT NULL
+                    ts               TEXT NOT NULL,
+                    bot_equity       REAL NOT NULL,
+                    benchmark_equity REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS bot_status (
@@ -75,6 +77,24 @@ class Journal:
                     rsi         REAL,
                     in_position INTEGER,
                     entry_price REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS position_state (
+                    id               INTEGER PRIMARY KEY CHECK (id = 1),
+                    ts               TEXT,
+                    in_position      INTEGER,
+                    position_units   REAL,
+                    entry_price      REAL,
+                    stop_price       REAL,
+                    tp_price         REAL,
+                    sl_order_id      TEXT,
+                    cash             REAL,
+                    initial_capital  REAL,
+                    price0           REAL,
+                    day_start_equity REAL,
+                    day_start_date   TEXT,
+                    week_start_equity REAL,
+                    week_start_date  TEXT
                 );
                 """
             )
@@ -104,11 +124,11 @@ class Journal:
                  ema_fast, ema_slow, rsi, pnl_pct),
             )
 
-    def record_equity(self, bot_equity: float, binance_equity: float, ts: str | None = None) -> None:
+    def record_equity(self, bot_equity: float, benchmark_equity: float, ts: str | None = None) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO equity (ts, bot_equity, binance_equity) VALUES (?,?,?)",
-                (ts or _now_iso(), bot_equity, binance_equity),
+                "INSERT INTO equity (ts, bot_equity, benchmark_equity) VALUES (?,?,?)",
+                (ts or _now_iso(), bot_equity, benchmark_equity),
             )
 
     def update_status(
@@ -152,4 +172,32 @@ class Journal:
     def status(self) -> dict | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM bot_status WHERE id = 1").fetchone()
+            return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Estado persistente de la posición (para recuperar tras un reinicio)
+    # ------------------------------------------------------------------
+    _POSITION_FIELDS = (
+        "in_position", "position_units", "entry_price", "stop_price", "tp_price",
+        "sl_order_id", "cash", "initial_capital", "price0",
+        "day_start_equity", "day_start_date", "week_start_equity", "week_start_date",
+    )
+
+    def save_position(self, state: dict) -> None:
+        """Guarda (upsert) el estado completo de la posición en una sola fila."""
+        cols = ", ".join(self._POSITION_FIELDS)
+        placeholders = ", ".join("?" for _ in self._POSITION_FIELDS)
+        updates = ", ".join(f"{c}=excluded.{c}" for c in self._POSITION_FIELDS)
+        values = [state.get(f) for f in self._POSITION_FIELDS]
+        with self._connect() as conn:
+            conn.execute(
+                f"""INSERT INTO position_state (id, ts, {cols})
+                    VALUES (1, ?, {placeholders})
+                    ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, {updates}""",
+                [_now_iso(), *values],
+            )
+
+    def load_position(self) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM position_state WHERE id = 1").fetchone()
             return dict(row) if row else None

@@ -232,22 +232,33 @@ st.divider()
 # ======================================================================
 st.header("📈 Gráficas")
 
-# --- 1) Curva de equity: bot vs Binance ---
-st.subheader("Curva de equity  ·  🔵 Bot vs 🟢 Binance")
+# --- 1) Curva de equity: estrategia vs comprar-y-mantener ---
+st.subheader("Curva de equity  ·  🔵 Estrategia del bot vs 🟢 Comprar y mantener")
 if not equity.empty:
     fig_eq = go.Figure()
     fig_eq.add_trace(go.Scatter(x=equity["ts"], y=equity["bot_equity"],
-                                name="🔵 Equity bot", line=dict(color="#1c7ed6")))
-    fig_eq.add_trace(go.Scatter(x=equity["ts"], y=equity["binance_equity"],
-                                name="🟢 Equity Binance", line=dict(color="#2f9e44")))
+                                name="🔵 Estrategia", line=dict(color="#1c7ed6")))
+    fig_eq.add_trace(go.Scatter(x=equity["ts"], y=equity["benchmark_equity"],
+                                name="🟢 Comprar y mantener", line=dict(color="#2f9e44")))
     fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
                          yaxis_title=f"Equity ({quote})", legend=dict(orientation="h"))
     st.plotly_chart(fig_eq, width="stretch")
 
-    drift = (equity["bot_equity"] - equity["binance_equity"]).abs().iloc[-1]
-    if drift > equity["binance_equity"].iloc[-1] * 0.01:   # >1% de divergencia
-        st.warning(f"⚠️ Divergencia bot↔Binance: {drift:,.2f} {quote}. "
-                   "Puede deberse a comisiones, slippage o un fill a precio distinto.")
+    # ¿La estrategia le gana a simplemente HODLear?
+    strat = equity["bot_equity"].iloc[-1]
+    hold = equity["benchmark_equity"].iloc[-1]
+    diff_pct = (strat / hold - 1) * 100 if hold else 0.0
+    start = equity["bot_equity"].iloc[0]
+    ret_pct = (strat / start - 1) * 100 if start else 0.0
+    m1, m2 = st.columns(2)
+    m1.metric("Retorno estrategia", f"{ret_pct:+.2f}%")
+    m2.metric("vs comprar-y-mantener", f"{diff_pct:+.2f}%",
+              help="Positivo = la estrategia va mejor que solo HODLear.")
+    if diff_pct >= 0:
+        st.success(f"✅ La estrategia va {diff_pct:+.2f}% respecto a comprar y mantener.")
+    else:
+        st.warning(f"⚠️ La estrategia va {diff_pct:+.2f}% respecto a comprar y mantener "
+                   "(por ahora HODLear habría sido mejor).")
 else:
     st.info("Sin snapshots de equity todavía (el bot los va generando al correr).")
 
@@ -283,9 +294,9 @@ else:
     st.info("Conecta Binance (.env) para ver el gráfico de velas.")
 
 # --- 3) Drawdown ---
-st.subheader("Drawdown a lo largo del tiempo  ·  🟢 sobre equity de Binance")
+st.subheader("Drawdown a lo largo del tiempo  ·  🔵 sobre equity de la estrategia")
 if not equity.empty:
-    eq = equity.set_index("ts")["binance_equity"]
+    eq = equity.set_index("ts")["bot_equity"]
     dd = (eq - eq.cummax()) / eq.cummax() * 100
     fig_dd = go.Figure()
     fig_dd.add_trace(go.Scatter(x=dd.index, y=dd.values, fill="tozeroy",

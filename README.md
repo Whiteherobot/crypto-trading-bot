@@ -126,12 +126,24 @@ python -m live.paper_trade
 
 - Revisa el mercado cada 60 s, calcula la señal y ejecuta órdenes de mercado
   **reales en la testnet**.
+- **Stop-loss REAL en Binance:** al abrir posición coloca una orden
+  `STOP_LOSS_LIMIT` que queda descansando en el exchange, así te protege
+  **aunque el bot se apague**. El take-profit y el cruce bajista se gestionan por
+  sondeo (cancelando antes el stop real). Si el exchange rechazara el stop,
+  hay un respaldo interno por sondeo.
+- **Contabilidad limpia:** la estrategia lleva su propia posición y efectivo,
+  **separados** del resto de saldos de la cuenta. Nunca vende monedas que no
+  compró y su tamaño es siempre `position_size_pct` del capital.
+- **Kill-switch de pérdida:** si la estrategia pierde más de
+  `max_daily_loss_pct` en el día o `max_weekly_loss_pct` en la semana, **cierra
+  la posición y detiene el bot** automáticamente.
+- **Recuperación tras reinicio:** el estado de la posición se persiste en
+  `data/cryptobot.db`. Si el bot se reinicia (crash, reboot), retoma la posición
+  y detecta si el stop-loss real se ejecutó mientras estuvo caído.
 - Cada decisión queda registrada en `logs/live.log` (precio, indicadores,
-  motivo de entrada/salida, hora).
+  motivo de entrada/salida, hora) y en el diario SQLite que alimenta el dashboard.
 - Maneja caídas de red y rate limits con reintentos y backoff exponencial.
 - Pársalo con **Ctrl+C**.
-- Además de `logs/live.log`, el bot escribe un **diario estructurado** en
-  `data/cryptobot.db` (SQLite) que alimenta el dashboard.
 
 ---
 
@@ -155,8 +167,9 @@ segundos (configurable en la barra lateral). Secciones:
 - **Historial de operaciones**: tabla que **reconcilia** las órdenes de Binance
   (🟢 verdad oficial) con el diario del bot (🔵 motivo de cada decisión). Si una
   orden aparece en una fuente y no en la otra, lo marca como **alerta**.
-- **Gráficas**: equity 🔵 bot vs 🟢 Binance (detecta drift), velas con EMAs y
-  marcadores de compra/venta, y drawdown.
+- **Gráficas**: curva de equity 🔵 **estrategia** vs 🟢 **comprar-y-mantener**
+  (para ver si la estrategia le gana a solo HODLear), velas con EMAs y
+  marcadores de compra/venta, y drawdown de la estrategia.
 
 > **Dos fuentes, siempre etiquetadas:** 🟢 = API de Binance Testnet (lo que
 > realmente se ejecutó) · 🔵 = diario local del bot (el porqué de cada orden).
@@ -181,6 +194,9 @@ Todo se cambia en **`config/config.py`** (no hay números mágicos en el código
 | `stop_loss_pct`      | `RiskConfig`     | Stop-loss                             |
 | `take_profit_pct`    | `RiskConfig`     | Take-profit                           |
 | `fee_pct`            | `RiskConfig`     | Comisión estimada por lado            |
+| `use_exchange_stop`  | `RiskConfig`     | Colocar el stop-loss como orden real  |
+| `max_daily_loss_pct` | `RiskConfig`     | Kill-switch: pérdida diaria máxima    |
+| `max_weekly_loss_pct`| `RiskConfig`     | Kill-switch: pérdida semanal máxima   |
 
 ---
 

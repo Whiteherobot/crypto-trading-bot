@@ -71,6 +71,14 @@ class RiskConfig:
     take_profit_pct: float = 0.04       # take-profit 4% por encima (ratio 1:2)
     fee_pct: float = 0.001              # comisión estimada por lado (0.1% taker)
 
+    # --- Stop-loss REAL en el exchange (no solo lógica interna) ---
+    use_exchange_stop: bool = True      # coloca una orden STOP_LOSS_LIMIT que queda en Binance
+    stop_limit_buffer_pct: float = 0.005  # el precio límite se pone 0.5% por debajo del stop
+
+    # --- Kill-switch: detiene el bot si la pérdida supera estos límites ---
+    max_daily_loss_pct: float = 0.05    # -5% en el día -> cierra y detiene
+    max_weekly_loss_pct: float = 0.10   # -10% en la semana -> cierra y detiene
+
 
 # ----------------------------------------------------------------------
 # Instancias listas para importar:  from config.config import STRATEGY, RISK ...
