@@ -228,6 +228,54 @@ st.divider()
 
 
 # ======================================================================
+#  ¿ES RENTABLE?  ·  resumen de ganancias
+# ======================================================================
+st.header("💵 ¿Es rentable?  ·  resultado acumulado de la estrategia")
+
+closed = trades[(trades["side"] == "sell") & trades["pnl_pct"].notna()] if not trades.empty else trades
+if not equity.empty:
+    capital_ini = float(equity["bot_equity"].iloc[0])
+    equity_actual = float(equity["bot_equity"].iloc[-1])
+    ganancia_usdt = equity_actual - capital_ini
+    ganancia_pct = (equity_actual / capital_ini - 1) * 100 if capital_ini else 0.0
+
+    g1, g2, g3 = st.columns(3)
+    g1.metric(f"💰 Ganancia total ({quote})", f"{ganancia_usdt:+,.2f}",
+              help="Equity actual de la estrategia menos el capital con el que empezó.")
+    g2.metric("📈 Rentabilidad", f"{ganancia_pct:+.2f}%")
+    g3.metric("💼 Capital", f"{capital_ini:,.2f} → {equity_actual:,.2f}")
+
+    if ganancia_usdt > 0:
+        st.success(f"✅ Por ahora la estrategia es RENTABLE: {ganancia_usdt:+,.2f} {quote} "
+                   f"({ganancia_pct:+.2f}%).")
+    elif ganancia_usdt < 0:
+        st.error(f"🔻 Por ahora la estrategia PIERDE: {ganancia_usdt:+,.2f} {quote} "
+                 f"({ganancia_pct:+.2f}%).")
+    else:
+        st.info("Todavía sin variación (aún no hay operaciones cerradas).")
+else:
+    st.info("Aún no hay datos. Corre el bot un rato y aquí verás la ganancia acumulada.")
+
+# Desglose de operaciones cerradas (ganadoras vs perdedoras)
+if not closed.empty:
+    wins = closed[closed["pnl_pct"] > 0]
+    losses = closed[closed["pnl_pct"] <= 0]
+    win_rate = len(wins) / len(closed) * 100
+    o1, o2, o3, o4 = st.columns(4)
+    o1.metric("Operaciones cerradas", f"{len(closed)}")
+    o2.metric("🟢 Ganadoras", f"{len(wins)}")
+    o3.metric("🔴 Perdedoras", f"{len(losses)}")
+    o4.metric("Win rate", f"{win_rate:.0f}%")
+    st.caption(f"Mejor operación: {closed['pnl_pct'].max():+.2f}%  ·  "
+               f"Peor operación: {closed['pnl_pct'].min():+.2f}%  ·  "
+               f"Resultado medio por operación: {closed['pnl_pct'].mean():+.2f}%")
+else:
+    st.caption("Aún no hay operaciones **cerradas** (la ganancia se realiza al vender).")
+
+st.divider()
+
+
+# ======================================================================
 #  c) GRÁFICAS
 # ======================================================================
 st.header("📈 Gráficas")
