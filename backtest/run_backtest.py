@@ -18,8 +18,9 @@ matplotlib.use("Agg")            # backend sin ventana (guarda a archivo)
 import matplotlib.pyplot as plt
 
 from backtest.backtester import PERIODS_PER_YEAR, Backtester
-from config.config import MARKET, RISK, STRATEGY
+from config.config import MARKET, RISK
 from data.data_fetcher import fetch_ohlcv
+from strategy.factory import build_strategy
 from utils.exchange import get_exchange
 from utils.logger import get_logger
 
@@ -34,12 +35,13 @@ def main() -> None:
     df = fetch_ohlcv(exchange, MARKET.symbol, MARKET.timeframe, limit=MARKET.history_limit)
     log.info("Velas descargadas: %d  (%s -> %s)", len(df), df.index[0], df.index[-1])
 
-    result = Backtester(STRATEGY, RISK).run(df)
+    strategy = build_strategy()
+    result = Backtester(strategy, RISK).run(df)
 
     # ---- Métricas ----
     ppy = PERIODS_PER_YEAR[MARKET.timeframe]
     print("\n" + "=" * 42)
-    print(f"  RESULTADOS BACKTEST  {MARKET.symbol} {MARKET.timeframe}")
+    print(f"  RESULTADOS BACKTEST  {MARKET.symbol} {MARKET.timeframe}  ·  estrategia={MARKET.strategy}")
     print("=" * 42)
     for k, v in result.summary(ppy).items():
         print(f"  {k:<20}: {v}")

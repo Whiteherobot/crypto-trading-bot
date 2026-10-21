@@ -4,13 +4,44 @@ backtest/backtester.py
 Motor de backtest propio, event-driven (vela a vela). Es deliberadamente
 simple y legible para que entiendas EXACTAMENTE cómo se calcula cada métrica.
 
-Supuestos (realistas pero sencillos):
+Funciona con CUALQUIER estrategia que implemente generate_signals() (columna
+'signal': +1 entrada, -1 salida por indicador) — hoy hay tres:
+  - EmaRsiStrategy (EXIT_STYLE="trailing"): seguimiento de tendencia, stop
+    fijo/ATR con trailing desde el máximo alcanzado.
+  - BBRsiStrategy (EXIT_STYLE="target_time_stop"): reversión a la media,
+    objetivo en la banda media + stop fijo + cierre forzado por tiempo.
+  - RegimeSwitchStrategy (EXIT_STYLE="regime_switch"): usa ema_rsi en
+    régimen alcista y bb_rsi en régimen lateral; cada POSICIÓN recuerda con
+    cuál entró (`entry_style`) y se gestiona con la lógica correspondiente
+    aunque el régimen cambie mientras está abierta.
+La gestión de posición (qué dispara la salida, en qué orden) se delega a
+`_manage_trailing()`, `_manage_target_time_stop()` o `_manage_regime_switch()`
+según ese atributo, porque cada estilo de estrategia protege el riesgo de
+forma distinta.
+
+Supuestos comunes (realistas pero sencillos):
 - Long-only (compramos y vendemos; no hay cortos).
 - Entramos al CIERRE de la vela que da la señal (sin mirar el futuro).
-- En cada vela con posición abierta comprobamos si el LOW tocó el stop-loss
-  o el HIGH tocó el take-profit (gestión de riesgo intra-vela).
+- Tras cerrar una posición, se ignoran nuevas señales de entrada durante
+  `cooldown_candles` velas.
 - Aplicamos una comisión `fee_pct` por cada lado (compra y venta).
 - Tamaño de posición = position_size_pct del capital disponible.
+
+EmaRsiStrategy — gestión "trailing":
+- En cada vela con posición abierta comprobamos si el LOW tocó el stop
+  efectivo (gestión de riesgo intra-vela).
+- Stop efectivo = max(stop fijo, trailing stop). El trailing stop sigue el
+  precio HIGH máximo alcanzado desde la entrada ("peak"); nunca es más laxo
+  que el stop fijo, pero sube a medida que sube el precio. Si `atr_multiplier`
+  está activo, tanto el stop inicial como el trailing se basan en el ATR
+  (volatilidad) en vez de un % fijo -- el % fijo (`stop_loss_pct`) actúa
+  como techo máximo de riesgo del stop inicial. Si ambos son None, el stop
+  efectivo es siempre el fijo (sin trailing).
+
+BBRsiStrategy — gestión "target_time_stop" (SIN trailing, a propósito):
+- Orden de prioridad de salida: 1) objetivo (banda media, señal=-1),
+  2) stop-loss fijo (`BBRsiConfig.stop_loss_pct`), 3) time-stop
+  (`BBRsiConfig.time_stop_candles` velas sin llegar al objetivo).
 """
 
 from __future__ import annotations
@@ -20,8 +51,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from config.config import RiskConfig, StrategyConfig
-from strategy.ema_rsi_strategy import EmaRsiStrategy
+from config.config import RiskConfig
 
 
 @dataclass
@@ -32,7 +62,7 @@ class Trade:
     exit_price: float
     units: float
     pnl: float
-    reason: str          # "take_profit" | "stop_loss" | "ema_cross"
+    reason: str          # "trailing_stop" | "stop_loss" | "ema_cross" | "target_mean" | "time_stop" | "trend_exit"
 
 
 @dataclass
@@ -95,36 +125,121 @@ PERIODS_PER_YEAR = {
 
 
 class Backtester:
-    def __init__(self, strat_cfg: StrategyConfig, risk_cfg: RiskConfig):
-        self.strategy = EmaRsiStrategy(strat_cfg)
+    def __init__(self, strategy, risk_cfg: RiskConfig):
+        """`strategy` es un objeto YA INSTANCIADO (EmaRsiStrategy(...) o
+        BBRsiStrategy(...)), no una config cruda — así el backtester no
+        necesita saber qué clase de estrategia es, solo su EXIT_STYLE."""
+        self.strategy = strategy
         self.risk = risk_cfg
 
+    # ------------------------------------------------------------------
+    #  Gestión de posición para EmaRsiStrategy (EXIT_STYLE="trailing")
+    # ------------------------------------------------------------------
+    def _manage_trailing(self, row, state: dict) -> tuple[float | None, str | None]:
+        state["peak_price"] = max(state["peak_price"], row["high"])
+        effective_stop = state["stop_price"]
+        if self.risk.atr_multiplier:
+            trail_distance = self.risk.atr_multiplier * row["atr"]
+            effective_stop = max(effective_stop, state["peak_price"] - trail_distance)
+        elif self.risk.trail_pct:
+            effective_stop = max(effective_stop, state["peak_price"] * (1 - self.risk.trail_pct))
+
+        if row["low"] <= effective_stop:
+            reason = "trailing_stop" if effective_stop > state["stop_price"] else "stop_loss"
+            return effective_stop, reason
+        if not row["regime_ok"]:
+            return row["close"], "regime_exit"
+        if row["signal"] == -1:
+            return row["close"], "ema_cross"
+        return None, None
+
+    def _open_trailing(self, row, price: float) -> dict:
+        fixed_stop_distance = price * self.risk.stop_loss_pct
+        if self.risk.atr_multiplier:
+            # ATR como distancia de stop, pero nunca más ancho que el % fijo (techo de riesgo)
+            stop_distance = min(self.risk.atr_multiplier * row["atr"], fixed_stop_distance)
+        else:
+            stop_distance = fixed_stop_distance
+        return {"stop_price": price - stop_distance, "peak_price": price}
+
+    # ------------------------------------------------------------------
+    #  Gestión de posición para BBRsiStrategy (EXIT_STYLE="target_time_stop")
+    # ------------------------------------------------------------------
+    def _manage_target_time_stop(self, row, state: dict, i: int) -> tuple[float | None, str | None]:
+        # Orden de prioridad pedido: 1) objetivo, 2) stop fijo, 3) time-stop
+        if row["signal"] == -1:
+            return row["close"], "target_mean"
+        if row["low"] <= state["stop_price"]:
+            return state["stop_price"], "stop_loss"
+        if (i - state["entry_i"]) >= self.strategy.cfg.time_stop_candles:
+            return row["close"], "time_stop"
+        return None, None
+
+    def _open_target_time_stop(self, price: float, i: int) -> dict:
+        stop_price = price * (1 - self.strategy.cfg.stop_loss_pct)
+        return {"stop_price": stop_price, "entry_i": i}
+
+    # ------------------------------------------------------------------
+    #  Gestión de posición para RegimeSwitchStrategy (EXIT_STYLE="regime_switch")
+    # ------------------------------------------------------------------
+    def _manage_regime_switch(self, row, state: dict, i: int) -> tuple[float | None, str | None]:
+        if state["sub_style"] == "trend":
+            state["peak_price"] = max(state["peak_price"], row["high"])
+            effective_stop = state["stop_price"]
+            if self.risk.atr_multiplier:
+                effective_stop = max(effective_stop, state["peak_price"] - self.risk.atr_multiplier * row["atr"])
+            elif self.risk.trail_pct:
+                effective_stop = max(effective_stop, state["peak_price"] * (1 - self.risk.trail_pct))
+            if row["low"] <= effective_stop:
+                reason = "trailing_stop" if effective_stop > state["stop_price"] else "stop_loss"
+                return effective_stop, reason
+            if row["trend_exit_ok"]:
+                return row["close"], "trend_exit"
+            return None, None
+        else:   # sub_style == "reversion"
+            if row["reversion_exit_ok"]:
+                return row["close"], "target_mean"
+            if row["low"] <= state["stop_price"]:
+                return state["stop_price"], "stop_loss"
+            if (i - state["entry_i"]) >= self.strategy.bb_cfg.time_stop_candles:
+                return row["close"], "time_stop"
+            return None, None
+
+    def _open_regime_switch(self, row, price: float, i: int) -> dict:
+        sub_style = row["entry_style"]
+        if sub_style == "trend":
+            state = self._open_trailing(row, price)
+        else:
+            state = {"stop_price": price * (1 - self.strategy.bb_cfg.stop_loss_pct), "entry_i": i}
+        state["sub_style"] = sub_style
+        return state
+
+    # ------------------------------------------------------------------
     def run(self, df: pd.DataFrame) -> BacktestResult:
         data = self.strategy.generate_signals(df).dropna()
+        style = self.strategy.EXIT_STYLE
 
         cash = self.risk.initial_capital
         in_position = False
         units = 0.0
-        entry_price = stop_price = tp_price = 0.0
+        entry_price = 0.0
         entry_time = None
+        state: dict = {}
+        last_exit_i = -10**9   # índice de vela del último cierre (para el cooldown)
 
         trades: list[Trade] = []
         equity_curve: list[float] = []
 
-        for ts, row in data.iterrows():
+        for i, (ts, row) in enumerate(data.iterrows()):
             price = row["close"]
 
             if in_position:
-                exit_price = exit_reason = None
-
-                # 1) ¿Se tocó stop-loss o take-profit dentro de la vela?
-                if row["low"] <= stop_price:
-                    exit_price, exit_reason = stop_price, "stop_loss"
-                elif row["high"] >= tp_price:
-                    exit_price, exit_reason = tp_price, "take_profit"
-                # 2) ¿Señal de salida por cruce bajista de EMAs?
-                elif row["signal"] == -1:
-                    exit_price, exit_reason = price, "ema_cross"
+                if style == "trailing":
+                    exit_price, exit_reason = self._manage_trailing(row, state)
+                elif style == "regime_switch":
+                    exit_price, exit_reason = self._manage_regime_switch(row, state, i)
+                else:
+                    exit_price, exit_reason = self._manage_target_time_stop(row, state, i)
 
                 if exit_price is not None:
                     proceeds = units * exit_price * (1 - self.risk.fee_pct)
@@ -136,16 +251,21 @@ class Backtester:
                     )
                     in_position = False
                     units = 0.0
+                    last_exit_i = i
 
-            # 3) ¿Señal de entrada y estamos fuera del mercado?
-            elif row["signal"] == 1:
+            # ¿Señal de entrada, estamos fuera del mercado y ya pasó el cooldown?
+            elif row["signal"] == 1 and (i - last_exit_i) >= self.risk.cooldown_candles:
                 position_value = cash * self.risk.position_size_pct
                 units = position_value / price * (1 - self.risk.fee_pct)
                 cash -= position_value
                 entry_price = price
                 entry_time = ts
-                stop_price = price * (1 - self.risk.stop_loss_pct)
-                tp_price = price * (1 + self.risk.take_profit_pct)
+                if style == "trailing":
+                    state = self._open_trailing(row, price)
+                elif style == "regime_switch":
+                    state = self._open_regime_switch(row, price, i)
+                else:
+                    state = self._open_target_time_stop(price, i)
                 in_position = True
 
             # Equity = efectivo + valor de la posición abierta a precio actual
