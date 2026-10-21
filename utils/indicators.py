@@ -31,3 +31,32 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    ATR (Average True Range), método de Wilder. Mide la volatilidad reciente
+    en unidades de precio (no en %). Requiere columnas high/low/close.
+    """
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return true_range.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def bollinger(series: pd.Series, period: int = 20, n_std: float = 2.0) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Bandas de Bollinger: media móvil simple +/- n_std desviaciones estándar.
+    Devuelve (banda_inferior, media, banda_superior).
+    """
+    mid = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    upper = mid + n_std * std
+    lower = mid - n_std * std
+    return lower, mid, upper
