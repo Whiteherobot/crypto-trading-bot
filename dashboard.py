@@ -116,6 +116,17 @@ if status:
         signo = "rápida ARRIBA" if gap > 0 else "rápida ABAJO"
         st.caption(f"🔵 Separación EMA{STRATEGY.ema_fast}/EMA{STRATEGY.ema_slow}: "
                    f"{gap:+.2f}% ({signo}) · último heartbeat: {status['ts']}")
+
+    breaker_until = status.get("breaker_until")
+    if breaker_until:
+        breaker_ts = pd.to_datetime(breaker_until, utc=True)
+        if breaker_ts.to_pydatetime() > now_utc():
+            st.warning(
+                f"⏸️ **Circuit breaker semanal ACTIVO** — el retorno de los últimos 7 días "
+                f"corridos cayó por debajo del límite configurado. El bot no abre posiciones "
+                f"nuevas hasta **{breaker_ts:%Y-%m-%d %H:%M} UTC**. Las posiciones ya abiertas "
+                f"siguen gestionadas con normalidad (stop/trailing)."
+            )
 else:
     st.info("Aún no hay datos del bot. Arráncalo con `python -m live.paper_trade`.")
 
@@ -314,16 +325,22 @@ else:
 st.subheader("Velas + EMAs + señales del bot")
 if exchange is not None:
     try:
-        ohlcv = fetch_ohlcv(exchange, MARKET.symbol, MARKET.timeframe, limit=200)
+        ohlcv = fetch_ohlcv(exchange, MARKET.symbol, MARKET.timeframe,
+                            limit=600 if STRATEGY.ema_trend else 200)
         ind = EmaRsiStrategy(STRATEGY).compute_indicators(ohlcv)
+        plot_ind = ind.tail(200)   # se piden más velas para estabilizar EMA200, pero solo graficamos las últimas 200
         fig_c = go.Figure()
         fig_c.add_trace(go.Candlestick(
-            x=ind.index, open=ind["open"], high=ind["high"], low=ind["low"],
-            close=ind["close"], name=MARKET.symbol))
-        fig_c.add_trace(go.Scatter(x=ind.index, y=ind["ema_fast"],
+            x=plot_ind.index, open=plot_ind["open"], high=plot_ind["high"], low=plot_ind["low"],
+            close=plot_ind["close"], name=MARKET.symbol))
+        fig_c.add_trace(go.Scatter(x=plot_ind.index, y=plot_ind["ema_fast"],
                                    name=f"EMA{STRATEGY.ema_fast}", line=dict(color="#f59f00")))
-        fig_c.add_trace(go.Scatter(x=ind.index, y=ind["ema_slow"],
+        fig_c.add_trace(go.Scatter(x=plot_ind.index, y=plot_ind["ema_slow"],
                                    name=f"EMA{STRATEGY.ema_slow}", line=dict(color="#7048e8")))
+        if STRATEGY.ema_trend:
+            fig_c.add_trace(go.Scatter(x=plot_ind.index, y=plot_ind["ema_trend"],
+                                       name=f"EMA{STRATEGY.ema_trend} (tendencia)",
+                                       line=dict(color="#495057", dash="dot")))
         if not trades.empty:
             buys = trades[trades["side"] == "buy"]
             sells = trades[trades["side"] == "sell"]

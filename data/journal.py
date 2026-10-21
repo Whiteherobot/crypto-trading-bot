@@ -76,7 +76,8 @@ class Journal:
                     ema_slow    REAL,
                     rsi         REAL,
                     in_position INTEGER,
-                    entry_price REAL
+                    entry_price REAL,
+                    breaker_until TEXT   -- circuit breaker semanal: no operar hasta esta fecha/hora
                 );
 
                 CREATE TABLE IF NOT EXISTS position_state (
@@ -98,6 +99,18 @@ class Journal:
                 );
                 """
             )
+            # Migración: columnas añadidas en rondas posteriores (CREATE TABLE
+            # IF NOT EXISTS no altera tablas ya existentes).
+            for col_def in ("peak_price REAL", "stop_price_fixed REAL", "last_exit_ts TEXT",
+                             "breaker_until TEXT", "entry_candle_ts TEXT"):
+                try:
+                    conn.execute(f"ALTER TABLE position_state ADD COLUMN {col_def}")
+                except sqlite3.OperationalError:
+                    pass   # la columna ya existe
+            try:
+                conn.execute("ALTER TABLE bot_status ADD COLUMN breaker_until TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     # ------------------------------------------------------------------
     # Escritura (la usa el bot)
@@ -140,18 +153,20 @@ class Journal:
         rsi: float | None = None,
         in_position: bool = False,
         entry_price: float | None = None,
+        breaker_until: str | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO bot_status
-                   (id, ts, running, price, ema_fast, ema_slow, rsi, in_position, entry_price)
-                   VALUES (1,?,?,?,?,?,?,?,?)
+                   (id, ts, running, price, ema_fast, ema_slow, rsi, in_position, entry_price, breaker_until)
+                   VALUES (1,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      ts=excluded.ts, running=excluded.running, price=excluded.price,
                      ema_fast=excluded.ema_fast, ema_slow=excluded.ema_slow, rsi=excluded.rsi,
-                     in_position=excluded.in_position, entry_price=excluded.entry_price""",
+                     in_position=excluded.in_position, entry_price=excluded.entry_price,
+                     breaker_until=excluded.breaker_until""",
                 (_now_iso(), int(running), price, ema_fast, ema_slow, rsi,
-                 int(in_position), entry_price),
+                 int(in_position), entry_price, breaker_until),
             )
 
     # ------------------------------------------------------------------
@@ -169,6 +184,15 @@ class Journal:
                 "SELECT * FROM equity ORDER BY ts", conn, parse_dates=["ts"]
             )
 
+    def equity_n_days_ago(self, days: float) -> float | None:
+        """Equity de la estrategia en el snapshot más cercano a hace `days` días (para el circuit breaker)."""
+        cutoff = (datetime.now(timezone.utc) - pd.Timedelta(days=days)).isoformat(timespec="seconds")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT bot_equity FROM equity WHERE ts <= ? ORDER BY ts DESC LIMIT 1", (cutoff,)
+            ).fetchone()
+            return float(row["bot_equity"]) if row else None
+
     def status(self) -> dict | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM bot_status WHERE id = 1").fetchone()
@@ -178,9 +202,10 @@ class Journal:
     # Estado persistente de la posición (para recuperar tras un reinicio)
     # ------------------------------------------------------------------
     _POSITION_FIELDS = (
-        "in_position", "position_units", "entry_price", "stop_price", "tp_price",
-        "sl_order_id", "cash", "initial_capital", "price0",
+        "in_position", "position_units", "entry_price", "stop_price", "stop_price_fixed",
+        "peak_price", "sl_order_id", "cash", "initial_capital", "price0",
         "day_start_equity", "day_start_date", "week_start_equity", "week_start_date",
+        "last_exit_ts", "breaker_until", "entry_candle_ts",
     )
 
     def save_position(self, state: dict) -> None:
