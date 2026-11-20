@@ -41,6 +41,13 @@ Por eso el bot quedó en paper trading supervisado con `ema_rsi`, la configuraci
 control del drawdown, para validar la infraestructura (órdenes, stops, reinicios y el
 dashboard) y no para ganar dinero.
 
+## ¿Querés probar tu propia estrategia?
+
+El método de validación de este proyecto (separar los datos de ajuste de los de prueba, walk-forward,
+detección de look-ahead y comparación con entradas al azar) está empaquetado como una skill para agentes de IA
+(Claude Code, Codex, Cursor y otros): **[Honest Backtest en Agensi](https://www.agensi.io/skills/honest-backtest-crypto-strategy-edge-checker)**.
+Le describís tu estrategia al agente y te dice si tiene una ventaja real o si está sobreajustada.
+
 ## Uso
 
 Requiere Python 3.10 a 3.13 y claves de la [testnet de Binance](https://testnet.binance.vision/).
